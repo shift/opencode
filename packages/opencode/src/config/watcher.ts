@@ -168,6 +168,11 @@ export namespace ConfigWatcher {
 
       log.info("config reloaded", { changedSections })
 
+      // Clear any affected services
+      if (changedSections.includes("agent")) {
+        app.services.delete("agent")
+      }
+
       // Emit reload event
       Bus.publish(Event.ConfigReloaded, {
         oldConfig,
