@@ -20,6 +20,12 @@ export namespace ConfigWatcher {
         changedSections: z.array(z.string()),
       }),
     ),
+    AgentAdded: Bus.event(
+      "config.agent.added",
+      z.object({
+        name: z.string(),
+      }),
+    ),
   }
 
   export const state = App.state(
@@ -28,31 +34,63 @@ export namespace ConfigWatcher {
       const watchers: ReturnType<typeof watch>[] = []
       let debounceTimer: Timer | null = null
       const debounceMs = 500
+      const watchedFiles = new Set<string>()
 
+      // Function to watch a specific file
+      function watchFile(file: string) {
+        if (watchedFiles.has(file)) return
+
+        try {
+          const watcher = watch(file, { persistent: false }, (_eventType, filename) => {
+            log.info("config file changed", { file: filename || file })
+
+            // Debounce multiple rapid changes
+            if (debounceTimer) {
+              clearTimeout(debounceTimer)
+            }
+
+            debounceTimer = setTimeout(async () => {
+              await reloadConfig()
+            }, debounceMs)
+          })
+
+          watchers.push(watcher)
+          watchedFiles.add(file)
+        } catch (error) {
+          log.warn("failed to watch config file", { file, error })
+        }
+      }
+
+      // Watch directories for new config files
+      function watchDir(dir: string) {
+        try {
+          const watcher = watch(dir, { persistent: false }, async (_eventType, filename) => {
+            if (filename === "opencode.json" || filename === "opencode.jsonc") {
+              const filePath = path.join(dir, filename)
+              if (await Bun.file(filePath).exists()) {
+                watchFile(filePath)
+                await reloadConfig()
+              }
+            }
+          })
+          watchers.push(watcher)
+        } catch (error) {
+          log.warn("failed to watch directory", { dir, error })
+        }
+      }
+
+      // Watch project directory
+      watchDir(app.path.cwd)
+
+      // Watch global config directory
+      watchDir(app.path.config)
+
+      // Watch existing config files
       const configFiles = await getConfigFiles(app)
       log.info("watching config files", { files: configFiles })
 
       for (const file of configFiles) {
-        try {
-          const watcher = watch(file, { persistent: false }, (eventType, filename) => {
-            if (eventType === "change") {
-              log.info("config file changed", { file: filename || file })
-
-              // Debounce multiple rapid changes
-              if (debounceTimer) {
-                clearTimeout(debounceTimer)
-              }
-
-              debounceTimer = setTimeout(async () => {
-                await reloadConfig()
-              }, debounceMs)
-            }
-          })
-
-          watchers.push(watcher)
-        } catch (error) {
-          log.warn("failed to watch config file", { file, error })
-        }
+        watchFile(file)
       }
 
       return {
