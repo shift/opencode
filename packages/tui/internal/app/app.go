@@ -51,6 +51,8 @@ type App struct {
 	IsLeaderSequence  bool
 	IsBashMode        bool
 	ScrollSpeed       int
+	AsyncAPI          *util.AsyncAPIManager
+	ConnectionStatus  string // "connecting", "connected", "disconnected", "error"
 }
 
 func (a *App) Agent() *opencode.Agent {
@@ -76,6 +78,11 @@ type ModelSelectedMsg struct {
 
 type AgentSelectedMsg struct {
 	AgentName string
+}
+
+type ConnectionStatusMsg struct {
+	Status  string // "connecting", "connected", "disconnected", "error"
+	Message string
 }
 
 type SessionClearedMsg struct{}
@@ -184,22 +191,24 @@ func New(
 	slog.Debug("Loaded config", "config", configInfo)
 
 	app := &App{
-		Info:           appInfo,
-		Agents:         agents,
-		Version:        version,
-		StatePath:      appStatePath,
-		Config:         configInfo,
-		State:          appState,
-		Client:         httpClient,
-		AgentIndex:     agentIndex,
-		Session:        &opencode.Session{},
-		Messages:       []Message{},
-		Commands:       commands.LoadFromConfig(configInfo),
-		InitialModel:   initialModel,
-		InitialPrompt:  initialPrompt,
-		InitialAgent:   initialAgent,
-		InitialSession: initialSession,
-		ScrollSpeed:    int(configInfo.Tui.ScrollSpeed),
+		Info:             appInfo,
+		Agents:           agents,
+		Version:          version,
+		StatePath:        appStatePath,
+		Config:           configInfo,
+		State:            appState,
+		Client:           httpClient,
+		AgentIndex:       agentIndex,
+		Session:          &opencode.Session{},
+		Messages:         []Message{},
+		Commands:         commands.LoadFromConfig(configInfo),
+		InitialModel:     initialModel,
+		InitialPrompt:    initialPrompt,
+		InitialAgent:     initialAgent,
+		InitialSession:   initialSession,
+		ScrollSpeed:      int(configInfo.Tui.ScrollSpeed),
+		AsyncAPI:         util.NewAsyncAPIManager(func(err error) { slog.Error("AsyncAPI error", "error", err) }),
+		ConnectionStatus: "connecting", // Start with connecting status
 	}
 
 	return app, nil
@@ -772,24 +781,26 @@ func (a *App) SendPrompt(ctx context.Context, prompt Prompt) (*App, tea.Cmd) {
 
 	a.Messages = append(a.Messages, message)
 
+	// Keep it simple - original approach but in a proper goroutine that doesn't block main thread
 	cmds = append(cmds, func() tea.Msg {
-		_, err := a.Client.Session.Chat(ctx, a.Session.ID, opencode.SessionChatParams{
-			ProviderID: opencode.F(a.Provider.ID),
-			ModelID:    opencode.F(a.Model.ID),
-			Agent:      opencode.F(a.Agent().Name),
-			MessageID:  opencode.F(messageID),
-			Parts:      opencode.F(message.ToSessionChatParams()),
-		})
-		if err != nil {
-			errormsg := fmt.Sprintf("failed to send message: %v", err)
-			slog.Error(errormsg)
-			return toast.NewErrorToast(errormsg)()
-		}
+		go func() {
+			// Use background context for the HTTP request - don't inherit the timeout
+			_, err := a.Client.Session.Chat(context.Background(), a.Session.ID, opencode.SessionChatParams{
+				ProviderID: opencode.F(a.Provider.ID),
+				ModelID:    opencode.F(a.Model.ID),
+				Agent:      opencode.F(a.Agent().Name),
+				MessageID:  opencode.F(messageID),
+				Parts:      opencode.F(message.ToSessionChatParams()),
+			})
+			if err != nil {
+				slog.Error("failed to send message", "error", err)
+			}
+		}()
+		// Return immediately - don't block
 		return nil
 	})
 
 	// The actual response will come through SSE
-	// For now, just return success
 	return a, tea.Batch(cmds...)
 }
 
@@ -804,24 +815,23 @@ func (a *App) SendShell(ctx context.Context, command string) (*App, tea.Cmd) {
 		cmds = append(cmds, util.CmdHandler(SessionCreatedMsg{Session: session}))
 	}
 
+	// Keep it simple - original approach but in a proper goroutine
 	cmds = append(cmds, func() tea.Msg {
-		_, err := a.Client.Session.Shell(
-			context.Background(),
-			a.Session.ID,
-			opencode.SessionShellParams{
+		go func() {
+			// Use background context for the HTTP request - don't inherit the timeout
+			_, err := a.Client.Session.Shell(context.Background(), a.Session.ID, opencode.SessionShellParams{
 				Agent:   opencode.F(a.Agent().Name),
 				Command: opencode.F(command),
-			},
-		)
-		if err != nil {
-			slog.Error("Failed to submit shell command", "error", err)
-			return toast.NewErrorToast("Failed to submit shell command")()
-		}
+			})
+			if err != nil {
+				slog.Error("failed to send shell command", "error", err)
+			}
+		}()
+		// Return immediately - don't block
 		return nil
 	})
 
 	// The actual response will come through SSE
-	// For now, just return success
 	return a, tea.Batch(cmds...)
 }
 

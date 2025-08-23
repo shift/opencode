@@ -656,7 +656,12 @@ export namespace Session {
     if (previous && previous.tokens) {
       const tokens =
         previous.tokens.input + previous.tokens.cache.read + previous.tokens.cache.write + previous.tokens.output
-      if (model.info.limit.context && tokens > Math.max((model.info.limit.context - outputLimit) * 0.9, 0)) {
+      // Calculate token thresholds
+      const contextLimit = model.info.limit.context || 0
+      const safetyBuffer = contextLimit * 0.1 // 10% safety buffer
+      const triggerThreshold = contextLimit - outputLimit - safetyBuffer
+
+      if (contextLimit && tokens > triggerThreshold) {
         state().autoCompacting.set(input.sessionID, true)
 
         await summarize({

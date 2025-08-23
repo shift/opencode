@@ -156,6 +156,15 @@ export namespace Config {
 
     log.info("loaded", result)
 
+    // Initialize config watcher and service reloader if not in test mode
+    if (!process.env.NODE_ENV?.includes("test")) {
+      const { ConfigWatcher } = await import("./watcher")
+      const { ServiceReloader } = await import("./service-reloader")
+
+      ConfigWatcher.init()
+      ServiceReloader.init()
+    }
+
     return result
   })
 

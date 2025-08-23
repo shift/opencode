@@ -17,7 +17,6 @@ import (
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode/internal/app"
 	"github.com/sst/opencode/internal/attachment"
-	"github.com/sst/opencode/internal/clipboard"
 	"github.com/sst/opencode/internal/commands"
 	"github.com/sst/opencode/internal/components/dialog"
 	"github.com/sst/opencode/internal/components/textarea"
@@ -52,19 +51,24 @@ type EditorComponent interface {
 
 type editorComponent struct {
 	app                    *app.App
-	width                  int
 	textarea               textarea.Model
 	spinner                spinner.Model
+	spinnerActive          bool
+	textareaFocused        bool
+	width                  int
+	height                 int
+	dialogStack            []string
 	interruptKeyInDebounce bool
 	exitKeyInDebounce      bool
-	historyIndex           int    // -1 means current (not in history)
-	currentText            string // Store current text when navigating history
-	pasteCounter           int
+	historyIndex           int
+	currentText            string
 	reverted               bool
+	pasteCounter           int
+	safeClipboard          *util.SafeClipboard
 }
 
 func (m *editorComponent) Init() tea.Cmd {
-	return tea.Batch(m.textarea.Focus(), m.spinner.Tick, tea.EnableReportFocus)
+	return tea.Batch(m.textarea.Focus(), tea.EnableReportFocus)
 }
 
 func (m *editorComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -74,10 +78,18 @@ func (m *editorComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width - 4
+		// Update textarea width immediately to prevent text overflow
+		m.textarea.SetWidth(m.width - 6)
 		return m, nil
 	case spinner.TickMsg:
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
+		// Power optimization: only process spinner updates when busy and visible
+		if m.app.IsBusy() {
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
+		// Stop spinner when not busy
+		m.spinnerActive = false
+		return m, nil
 	case tea.KeyPressMsg:
 		// Handle up/down arrows and ctrl+p/ctrl+n for history navigation
 		switch msg.String() {
@@ -322,7 +334,15 @@ func (m *editorComponent) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	m.spinner, cmd = m.spinner.Update(msg)
-	cmds = append(cmds, cmd)
+	if cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+
+	// Start spinner when app becomes busy
+	if m.app.IsBusy() && !m.spinnerActive {
+		m.spinnerActive = true
+		cmds = append(cmds, m.spinner.Tick)
+	}
 
 	m.textarea, cmd = m.textarea.Update(msg)
 	cmds = append(cmds, cmd)
@@ -514,7 +534,7 @@ func (m *editorComponent) Clear() (tea.Model, tea.Cmd) {
 }
 
 func (m *editorComponent) Paste() (tea.Model, tea.Cmd) {
-	imageBytes := clipboard.Read(clipboard.FmtImage)
+	imageBytes := m.safeClipboard.ReadImage()
 	if imageBytes != nil {
 		attachmentCount := len(m.textarea.GetAttachments())
 		attachmentIndex := attachmentCount + 1
@@ -537,7 +557,7 @@ func (m *editorComponent) Paste() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	textBytes := clipboard.Read(clipboard.FmtText)
+	textBytes := m.safeClipboard.ReadText()
 	if textBytes != nil {
 		text := string(textBytes)
 		// Check if the pasted text is long and should be summarized
@@ -549,8 +569,7 @@ func (m *editorComponent) Paste() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// fallback to reading the clipboard using OSC52
-	return m, tea.ReadClipboard
+	return m, nil
 }
 
 func (m *editorComponent) Newline() (tea.Model, tea.Cmd) {
@@ -718,6 +737,12 @@ func NewEditorComponent(app *app.App) EditorComponent {
 	ta.VirtualCursor = false
 	ta = updateTextareaStyles(ta)
 
+	// Create safe clipboard with error handler
+	errorHandler := func(err error) {
+		slog.Error("Clipboard operation failed", "error", err)
+	}
+	safeClipboard := util.NewSafeClipboard(errorHandler)
+
 	m := &editorComponent{
 		app:                    app,
 		textarea:               ta,
@@ -725,6 +750,7 @@ func NewEditorComponent(app *app.App) EditorComponent {
 		interruptKeyInDebounce: false,
 		historyIndex:           -1,
 		pasteCounter:           0,
+		safeClipboard:          safeClipboard,
 	}
 
 	return m

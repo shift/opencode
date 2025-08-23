@@ -9,6 +9,7 @@ import { App } from "../app/app"
 import { Filesystem } from "../util/filesystem"
 
 const DEFAULT_READ_LIMIT = 2000
+const MAX_READ_LINES = 10000
 const MAX_LINE_LENGTH = 2000
 
 export const ReadTool = Tool.define("read", {
@@ -49,27 +50,51 @@ export const ReadTool = Tool.define("read", {
       throw new Error(`File not found: ${filepath}`)
     }
 
-    const limit = params.limit ?? DEFAULT_READ_LIMIT
-    const offset = params.offset || 0
     const isImage = isImageFile(filepath)
     if (isImage) throw new Error(`This is an image file of type: ${isImage}\nUse a different tool to process images`)
     const isBinary = await isBinaryFile(filepath, file)
     if (isBinary) throw new Error(`Cannot read binary file: ${filepath}`)
+
     const lines = await file.text().then((text) => text.split("\n"))
-    const raw = lines.slice(offset, offset + limit).map((line) => {
+
+    // Handle large files by providing information about size
+    const totalLines = lines.length
+    const requestedLimit = params.limit ?? DEFAULT_READ_LIMIT
+    const actualLimit = Math.min(requestedLimit, MAX_READ_LINES)
+    const offset = params.offset || 0
+
+    if (offset >= totalLines) {
+      throw new Error(`Offset ${offset} is beyond the file length of ${totalLines} lines`)
+    }
+
+    const raw = lines.slice(offset, offset + actualLimit).map((line) => {
       return line.length > MAX_LINE_LENGTH ? line.substring(0, MAX_LINE_LENGTH) + "..." : line
     })
+
     const content = raw.map((line, index) => {
       return `${(index + offset + 1).toString().padStart(5, "0")}| ${line}`
     })
+
     const preview = raw.slice(0, 20).join("\n")
 
     let output = "<file>\n"
+
+    // Add file stats if it's a large file
+    if (totalLines > MAX_READ_LINES) {
+      output += `Note: This is a large file (${totalLines.toLocaleString()} lines). Showing lines ${offset + 1} to ${
+        offset + actualLimit
+      } of ${totalLines.toLocaleString()}.\n\n`
+    }
+
     output += content.join("\n")
 
     if (lines.length > offset + content.length) {
-      output += `\n\n(File has more lines. Use 'offset' parameter to read beyond line ${offset + content.length})`
+      const remainingLines = lines.length - (offset + content.length)
+      output += `\n\n(${remainingLines.toLocaleString()} more lines. Use 'offset' parameter to read beyond line ${
+        offset + content.length
+      })`
     }
+
     output += "\n</file>"
 
     // just warms the lsp client
